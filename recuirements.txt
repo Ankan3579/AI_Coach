@@ -1,0 +1,15 @@
+langchain 
+langgraph
+langchain-community
+langchain-core
+litellm
+python-dotenv
+psycopg[binary]
+SQLAlchemy
+langgraph-checkpoint-postgres
+requests
+mistralai
+groq
+openai
+openrouterapi
+langcahin-ollama
