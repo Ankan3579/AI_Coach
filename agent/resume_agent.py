@@ -342,32 +342,32 @@ Return JSON with exactly these fields:
 
 
 
-if __name__ == "__main__":
+# if __name__ == "__main__":
 
-    resume_path = r"D:\AI_Coach\Ankan_resume.pdf"
+#     resume_path = r"D:\AI_Coach\Untitled.pdf"
 
-    # Step 1: Extract text using PDF extraction and OCR.
-    resume_text = extract_resume_text(resume_path)
+#     # Step 1: Extract text using PDF extraction and OCR.
+#     resume_text = extract_resume_text(resume_path)
 
-    # print("\n===== EXTRACTED RESUME TEXT =====\n")
-    # print(resume_text)s
+#     # print("\n===== EXTRACTED RESUME TEXT =====\n")
+#     # print(resume_text)s
 
-    # Step 2: Analyze the extracted resume.
-    report = analyze_resume(
-        user_id="001",
-        resume_text=resume_text,
-        job_description=(
-            "Entry-level AI Engineer with Python, "
-            "machine learning, and API development skills."
-        ),
-    )
+#     # Step 2: Analyze the extracted resume.
+#     report = analyze_resume(
+#         user_id="001",
+#         resume_text=resume_text,
+#         job_description=(
+#             "Entry-level AI Engineer with Python, "
+#             "machine learning, and API development skills."
+#         ),
+#     )
 
-    print("\n===== RESUME ANALYSIS =====\n")
+#     print("\n===== RESUME ANALYSIS =====\n")
 
-    print(json.dumps(
-        report,
-        indent=2,
-        ensure_ascii=False,
-    ))
+#     print(json.dumps(
+#         report,
+#         indent=2,
+#         ensure_ascii=False,
+#     ))
 
 
