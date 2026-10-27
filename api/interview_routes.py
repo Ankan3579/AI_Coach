@@ -1,12 +1,16 @@
+import asyncio
+import json
 import uuid
+from typing import Literal
 
 from fastapi import APIRouter, HTTPException, Request
 from openai import OpenAI, OpenAIError
-from pydantic import BaseModel
+from pydantic import BaseModel, Field, field_validator
 
 from agent.interviewer.recommender import InterviewRecommender
 from agent.interviewer.evaluator import AnswerEvaluator
 from config import OPENAI_API_KEY
+from tools.guardrails import check_user_input_safety, validate_user_text
 
 
 router = APIRouter(
@@ -40,25 +44,65 @@ AUDIO_EXTENSIONS = {
 
 class StartInterviewRequest(BaseModel):
 
-    candidate_name: str
-    target_role: str = "AI Engineer"
+    candidate_name: str = Field(min_length=1, max_length=100)
+    target_role: str = Field(default="AI Engineer", min_length=1, max_length=120)
 
-    interview_type: str = "technical"
+    interview_type: Literal["technical", "coding", "behavioral"] = "technical"
 
-    selected_topic: str | None = None
+    selected_topic: str | None = Field(default=None, max_length=160)
 
-    duration_minutes: int = 45
+    duration_minutes: int = Field(default=45, ge=5, le=120)
 
-    difficulty: str = "medium"
+    difficulty: Literal["easy", "medium", "hard"] = "medium"
 
-    programming_language: str = "python"
+    programming_language: Literal[
+        "python", "javascript", "cpp", "java", "c"
+    ] = "python"
+
+    @field_validator("candidate_name", "target_role")
+    @classmethod
+    def validate_required_text(cls, value: str, info) -> str:
+        return validate_user_text(
+            value,
+            field=info.field_name.replace("_", " ").capitalize(),
+            max_length=100 if info.field_name == "candidate_name" else 120,
+        )
+
+    @field_validator("selected_topic")
+    @classmethod
+    def validate_topic(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        return validate_user_text(
+            value,
+            field="Selected topic",
+            max_length=160,
+        )
 
 
 class AnswerRequest(BaseModel):
 
-    session_id: str
-    answer: str = ""
-    code: str = ""
+    session_id: str = Field(min_length=1, max_length=64)
+    answer: str = Field(default="", max_length=20000)
+    code: str = Field(default="", max_length=50000)
+
+    @field_validator("answer", "code")
+    @classmethod
+    def validate_answer_text(cls, value: str, info) -> str:
+        return validate_user_text(
+            value,
+            field=info.field_name.capitalize(),
+            max_length=20000 if info.field_name == "answer" else 50000,
+            allow_empty=True,
+            strip_whitespace=info.field_name != "code",
+        )
+
+
+import logging
+import os
+import requests
+
+logger = logging.getLogger(__name__)
 
 
 def _transcribe_audio(audio: bytes, content_type: str) -> str:
@@ -70,34 +114,84 @@ def _transcribe_audio(audio: bytes, content_type: str) -> str:
             detail="Unsupported audio type. Send a supported audio recording.",
         )
 
-    if not OPENAI_API_KEY:
-        raise HTTPException(
-            status_code=503,
-            detail="Set OPENAI_API_KEY to enable Whisper transcription.",
-        )
+    transcript = ""
+    # Try OpenAI Whisper first if key is configured
+    if OPENAI_API_KEY:
+        try:
+            response = OpenAI(api_key=OPENAI_API_KEY).audio.transcriptions.create(
+                model="whisper-1",
+                file=(f"answer{extension}", audio, mime_type),
+            )
+            transcript = (response.text or "").strip()
+        except OpenAIError as exc:
+            logger.warning("OpenAI Whisper transcription failed (%s), falling back to Sarvam STT: %s", type(exc).__name__, exc)
 
-    try:
-        response = OpenAI(api_key=OPENAI_API_KEY).audio.transcriptions.create(
-            model="whisper-1",
-            file=(f"answer{extension}", audio, mime_type),
-        )
-    except OpenAIError as exc:
-        raise HTTPException(
-            status_code=502,
-            detail=f"Whisper transcription failed: {exc}",
-        ) from exc
+    # Fallback to Sarvam STT if Whisper failed or was not configured
+    if not transcript:
+        sarvam_key = os.getenv("SARVAM_API_KEY")
+        if sarvam_key:
+            try:
+                sarvam_resp = requests.post(
+                    "https://api.sarvam.ai/speech-to-text",
+                    headers={"api-subscription-key": sarvam_key},
+                    files={"file": (f"answer{extension}", audio, mime_type)},
+                    data={
+                        "model": os.getenv("SARVAM_STT_MODEL", "saaras:v4"),
+                        "language_code": os.getenv("SARVAM_LANGUAGE", "en-IN"),
+                    },
+                    timeout=30,
+                )
+                if sarvam_resp.status_code == 200:
+                    data = sarvam_resp.json()
+                    transcript = (data.get("transcript") or "").strip()
+                else:
+                    logger.warning("Sarvam STT returned status %d: %s", sarvam_resp.status_code, sarvam_resp.text[:200])
+            except Exception as sarvam_err:
+                logger.warning("Sarvam STT fallback failed: %s", sarvam_err)
 
-    transcript = response.text.strip()
     if not transcript:
         raise HTTPException(
             status_code=422,
-            detail="Whisper could not detect speech in the recording.",
+            detail="Speech could not be detected or transcribed in the recording. Please speak clearly into your microphone.",
+        )
+    if len(transcript) > 20000:
+        raise HTTPException(
+            status_code=422,
+            detail="The transcribed answer exceeds the 20000-character limit.",
         )
 
     return transcript
 
 
 def _process_answer(state: dict, answer: str, code: str = "") -> dict:
+    try:
+        answer = validate_user_text(
+            answer,
+            field="Answer",
+            max_length=20000,
+            allow_empty=True,
+        )
+        code = validate_user_text(
+            code,
+            field="Code",
+            max_length=50000,
+            allow_empty=True,
+            strip_whitespace=False,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+    if not answer and not code.strip():
+        raise HTTPException(
+            status_code=422,
+            detail="Submit an answer or source code",
+        )
+
+    if answer:
+        check_user_input_safety(answer, context="interview answer")
+    if code.strip():
+        check_user_input_safety(code, context="interview code")
+
     state["candidate_answer"] = answer
     state["code"] = code
 
@@ -159,6 +253,17 @@ async def start_interview(
         if request.interview_type == "coding"
         else "Machine Learning"
     )
+    await asyncio.to_thread(
+        check_user_input_safety,
+        json.dumps(
+            {
+                "target_role": request.target_role,
+                "interview_topic": selected_topic,
+            },
+            ensure_ascii=False,
+        ),
+        context="interview setup",
+    )
 
     state = {
 
@@ -198,8 +303,9 @@ async def start_interview(
 
     # Generate first question
 
-    question = recommender.recommend(
-        state
+    question = await asyncio.to_thread(
+        recommender.recommend,
+        state,
     )
 
     state["current_question"] = question["question"]
@@ -268,7 +374,12 @@ async def submit_answer(
             detail="Submit an answer or source code",
         )
 
-    return _process_answer(state, request.answer, request.code)
+    return await asyncio.to_thread(
+        _process_answer,
+        state,
+        request.answer,
+        request.code,
+    )
 
 
 @router.post("/{session_id}/answer-audio")
@@ -299,7 +410,11 @@ async def submit_audio_answer(session_id: str, request: Request):
         bytes(audio),
         request.headers.get("content-type", ""),
     )
-    result = _process_answer(state, transcript)
+    result = await asyncio.to_thread(
+        _process_answer,
+        state,
+        transcript,
+    )
     return {
         **result,
         "transcript": transcript,

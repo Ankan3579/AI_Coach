@@ -1,20 +1,39 @@
-import json
+from typing import Annotated, Literal
 
-from langchain_ollama import ChatOllama
+from config import invoke_llm
+from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator
 
 from agent.interviewer.prompt import (
     QUESTION_RECOMMENDATION_PROMPT
 )
+from tools.guardrails import (
+    check_model_output_safety,
+    serialize_untrusted,
+    strip_json_fence,
+)
+
+
+class QuestionRecommendation(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+
+    question: Annotated[str, Field(min_length=1, max_length=4000)]
+    question_type: Literal[
+        "technical", "behavioral", "resume", "coding", "follow_up"
+    ] = "technical"
+    topic: Annotated[str, Field(max_length=160)] = ""
+    difficulty: Literal["easy", "medium", "hard"] = "medium"
+    reason: Annotated[str, Field(max_length=2000)] = ""
+
+    @field_validator("question", "topic", "reason")
+    @classmethod
+    def strip_output_text(cls, value: str, info) -> str:
+        normalized = value.strip()
+        if info.field_name == "question" and not normalized:
+            raise ValueError("The generated question cannot be blank.")
+        return normalized
 
 
 class InterviewRecommender:
-
-    def __init__(self):
-
-        self.llm = ChatOllama(
-            model="qwen2.5:7b",
-            temperature=0.2,
-        )
 
     def recommend(self, state):
 
@@ -23,37 +42,25 @@ class InterviewRecommender:
             []
         )
 
-        history_text = json.dumps(
-            history,
-            indent=2,
-            ensure_ascii=False,
-        )
-
         prompt = QUESTION_RECOMMENDATION_PROMPT.format(
-
-            candidate_name=state.get(
-                "candidate_name",
-                "Candidate"
+            candidate_name=serialize_untrusted(
+                state.get("candidate_name", "Candidate")
             ),
 
-            target_role=state.get(
-                "target_role",
-                "AI Engineer"
+            target_role=serialize_untrusted(
+                state.get("target_role", "AI Engineer")
             ),
 
-            interview_type=state.get(
-                "interview_type",
-                "technical"
+            interview_type=serialize_untrusted(
+                state.get("interview_type", "technical")
             ),
 
-            programming_language=state.get(
-                "programming_language",
-                "python"
+            programming_language=serialize_untrusted(
+                state.get("programming_language", "python")
             ),
 
-            selected_topic=state.get(
-                "selected_topic",
-                ""
+            selected_topic=serialize_untrusted(
+                state.get("selected_topic", "")
             ),
 
             current_difficulty=state.get(
@@ -71,73 +78,52 @@ class InterviewRecommender:
                 "unknown"
             ),
 
-            resume_text=state.get(
-                "resume_text",
-                ""
+            resume_text=serialize_untrusted(
+                state.get("resume_text", "")
             ),
 
-            skills=state.get(
-                "skills",
-                []
+            skills=serialize_untrusted(state.get("skills", [])),
+
+            strong_skills=serialize_untrusted(
+                state.get("strong_skills", [])
             ),
 
-            strong_skills=state.get(
-                "strong_skills",
-                []
+            weak_skills=serialize_untrusted(
+                state.get("weak_skills", [])
             ),
 
-            weak_skills=state.get(
-                "weak_skills",
-                []
-            ),
-
-            interview_history=history_text,
+            interview_history=serialize_untrusted(history),
 
         )
 
-        response = self.llm.invoke(prompt)
-
-        content = response.content
-
-        if isinstance(content, list):
-
-            content = "".join(
-                item.get("text", "")
-                for item in content
-                if isinstance(item, dict)
-            )
-
-        content = content.strip()
-
-        if content.startswith("```"):
-
-            content = content.replace(
-                "```json",
-                ""
-            )
-
-            content = content.replace(
-                "```",
-                ""
-            )
-
-            content = content.strip()
+        content = invoke_llm(prompt, temperature=0.2)
+        content = strip_json_fence(content)
 
         try:
-
-            recommendation = json.loads(content)
-
-            if state.get("interview_type") == "coding":
-                recommendation["question_type"] = "coding"
-                recommendation["difficulty"] = state.get(
-                    "current_difficulty",
-                    "medium"
-                )
-
-            return recommendation
-
-        except json.JSONDecodeError as exc:
+            recommendation = QuestionRecommendation.model_validate_json(
+                content
+            ).model_dump()
+        except ValidationError as exc:
+            print("\n========== RECOMMENDER VALIDATION ERROR ==========")
+            print("RAW LLM OUTPUT:")
+            print(content)
+            print("\nPYDANTIC ERROR:")
+            print(exc)
+            print("=================================================\n")
 
             raise ValueError(
-                f"Question recommender returned invalid JSON:\n{content}"
-            ) from exc
+        "Question recommender returned invalid output."
+        ) from exc
+
+        if state.get("interview_type") == "coding":
+            recommendation["question_type"] = "coding"
+            recommendation["difficulty"] = state.get(
+                "current_difficulty",
+                "medium"
+            )
+
+        check_model_output_safety(
+            recommendation,
+            context="interview question",
+        )
+        return recommendation

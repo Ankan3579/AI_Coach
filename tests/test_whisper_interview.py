@@ -65,6 +65,7 @@ class WhisperInterviewTests(unittest.IsolatedAsyncioTestCase):
         )
         with (
             patch.object(interview_routes, "OPENAI_API_KEY", "test-key"),
+            patch.object(interview_routes, "check_user_input_safety"),
             patch.object(interview_routes, "OpenAI", return_value=openai_client) as openai,
             patch.object(
                 interview_routes.evaluator,

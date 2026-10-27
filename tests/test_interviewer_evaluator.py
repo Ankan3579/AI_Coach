@@ -1,29 +1,21 @@
 import json
 import unittest
-from types import SimpleNamespace
+from unittest.mock import patch
 
 from agent.interviewer.evaluator import AnswerEvaluator
 from agent.interviewer.recommender import InterviewRecommender
 
 
-class FakeLLM:
-    def __init__(self, content):
-        self.content = content
-        self.prompt = None
-
-    def invoke(self, prompt):
-        self.prompt = prompt
-        return SimpleNamespace(content=self.content)
-
-
 class AnswerEvaluatorTests(unittest.TestCase):
     def evaluate(self, score, state):
-        llm = FakeLLM(json.dumps({"score": score}))
-        evaluator = AnswerEvaluator.__new__(AnswerEvaluator)
-        evaluator.llm = llm
-
-        evaluation = evaluator.evaluate(state)
-        return evaluation, llm.prompt
+        with patch(
+            "agent.interviewer.evaluator.invoke_llm",
+            return_value=json.dumps({"score": score}),
+        ) as invoke, patch(
+            "agent.interviewer.evaluator.check_model_output_safety",
+        ):
+            evaluation = AnswerEvaluator().evaluate(state)
+            return evaluation, invoke.call_args.args[0]
 
     def test_coding_answer_is_sent_to_code_rubric(self):
         evaluation, prompt = self.evaluate(
@@ -38,9 +30,9 @@ class AnswerEvaluatorTests(unittest.TestCase):
             },
         )
 
-        self.assertIn("Question Type:\ncoding", prompt)
-        self.assertIn("def two_sum(nums, target): return []", prompt)
-        self.assertIn("I would use a hash map.", prompt)
+        self.assertIn('Question Type:\n"coding"', prompt)
+        self.assertIn('"def two_sum(nums, target): return []"', prompt)
+        self.assertIn('"I would use a hash map."', prompt)
         self.assertEqual(evaluation["recommended_difficulty"], "hard")
 
     def test_answer_only_coding_client_passes_answer_as_code(self):
@@ -53,8 +45,8 @@ class AnswerEvaluatorTests(unittest.TestCase):
             },
         )
 
-        self.assertIn("Candidate Code:\ndef solve():", prompt)
-        self.assertIn("Candidate Answer:\n\n", prompt)
+        self.assertIn('Candidate Code:\n"def solve():', prompt)
+        self.assertIn('Candidate Answer:\n""', prompt)
 
     def test_difficulty_changes_by_one_level_and_clamps(self):
         self.assertEqual(
@@ -77,24 +69,25 @@ class AnswerEvaluatorTests(unittest.TestCase):
         )
 
     def test_coding_recommendation_uses_adaptive_difficulty(self):
-        llm = FakeLLM(
-            json.dumps(
-                {
-                    "question": "Implement binary search.",
-                    "question_type": "technical",
-                    "difficulty": "easy",
-                }
-            )
-        )
-        recommender = InterviewRecommender.__new__(InterviewRecommender)
-        recommender.llm = llm
-
-        recommendation = recommender.recommend(
+        response = json.dumps(
             {
-                "interview_type": "coding",
-                "current_difficulty": "hard",
+                "question": "Implement binary search.",
+                "question_type": "technical",
+                "difficulty": "easy",
             }
         )
+        with patch(
+            "agent.interviewer.recommender.invoke_llm",
+            return_value=response,
+        ), patch(
+            "agent.interviewer.recommender.check_model_output_safety",
+        ):
+            recommendation = InterviewRecommender().recommend(
+                {
+                    "interview_type": "coding",
+                    "current_difficulty": "hard",
+                }
+            )
 
         self.assertEqual(recommendation["question_type"], "coding")
         self.assertEqual(recommendation["difficulty"], "hard")

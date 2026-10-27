@@ -17,10 +17,12 @@ def generate_cache_key(
     user_id: str,
     resume_text: str,
     job_description: str = "",
+    *,
+    namespace: str = "resume_analysis",
+    cache_version: str = "v1",
 ) -> str:
     """
-    Generate a cache key based on the user,
-    resume content, and target job description.
+    Generate a namespaced cache key from the user and input content.
     """
 
     content = json.dumps(
@@ -28,7 +30,7 @@ def generate_cache_key(
             "user_id": user_id,
             "resume": resume_text,
             "job_description": job_description,
-            "analysis_version": "v1",
+            "analysis_version": cache_version,
         },
         sort_keys=True,
     )
@@ -37,7 +39,7 @@ def generate_cache_key(
         content.encode("utf-8")
     ).hexdigest()
 
-    return f"resume_analysis:{digest}"
+    return f"{namespace}:{digest}"
 
 
 def get_cached_result(cache_key: str):
