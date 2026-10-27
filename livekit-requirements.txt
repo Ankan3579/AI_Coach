@@ -1,0 +1,8 @@
+livekit-agents>=1.8,<2
+livekit-api>=1.2,<2
+livekit-plugins-openai>=1.8,<2
+livekit-plugins-sarvam>=1.8,<2
+livekit-plugins-silero>=1.8,<2
+langchain-ollama>=0.3,<2
+python-dotenv>=1,<2
+litellm>=1.80,<2
